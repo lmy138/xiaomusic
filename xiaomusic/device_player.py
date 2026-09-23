@@ -70,6 +70,7 @@ class XiaoMusicDevice:
         self.event_bus = getattr(xiaomusic, "event_bus", None)
 
         self._download_proc = None  # 下载对象
+        self._download_in_progress = False
         self._next_timer = None
         self.is_playing = False
         # 播放进度
@@ -286,7 +287,9 @@ class XiaoMusicDevice:
             return False
 
         # 下载歌曲
-        await self.download(search_key, name)
+        if not await self.download(search_key or name, name):
+            self.is_playing = False
+            return False
         # 把文件插入到播放列表里
         await self.add_download_music(name)
         return True
@@ -763,6 +766,9 @@ class XiaoMusicDevice:
             "--no-playlist",
         )
 
+        if self.config.search_prefix.startswith("bilisearch:"):
+            sbp_args += ("--user-agent", "Mozilla/5.0")
+
         if self.config.proxy:
             sbp_args += ("--proxy", f"{self.config.proxy}")
 
@@ -774,16 +780,25 @@ class XiaoMusicDevice:
 
         cmd = " ".join(sbp_args)
         self.log.info(f"download cmd: {cmd}")
-        self._download_proc = await asyncio.create_subprocess_exec(*sbp_args)
-        await self.do_tts(f"正在下载歌曲{search_key}")
-        self.log.info(f"正在下载中 {search_key} {name}")
-        await self._download_proc.wait()
-        # 下载完成后，修改文件权限
-        file_path = os.path.join(self.config.download_path, f"{name}.mp3")
-        chmodfile(file_path)
+        self._download_in_progress = True
+        try:
+            self._download_proc = await asyncio.create_subprocess_exec(*sbp_args)
+            await self.do_tts(f"正在下载歌曲{search_key}")
+            self.log.info(f"正在下载中 {search_key} {name}")
+            returncode = await self._download_proc.wait()
+            file_path = os.path.join(self.config.download_path, f"{name}.mp3")
+            if returncode != 0 or not os.path.isfile(file_path):
+                self.log.error(f"下载歌曲失败: {name}, returncode:{returncode}")
+                return False
+            chmodfile(file_path)
+            return True
+        finally:
+            self._download_in_progress = False
 
     async def check_replay(self):
         """检查是否需要继续播放被打断的歌曲"""
+        if self._download_in_progress:
+            return
         if self.is_playing and not self.isdownloading():
             if not self.config.continue_play:
                 # 重新播放歌曲
@@ -1326,3 +1341,4 @@ class XiaoMusicDevice:
         self.log.info(f"用户选择了第{index}个: {selected_name}")
         # 保持待选择状态不变，支持用户继续选择其他歌曲
         await self._playmusic(selected_name)
+
